@@ -2,9 +2,7 @@
 .ipynb_checkpoints/
 drone/lib/
 .DS_Store
-.DS_Store
 Dataset/
 drone/
 cache/
-Dataset/
-drone/
+/cache/
