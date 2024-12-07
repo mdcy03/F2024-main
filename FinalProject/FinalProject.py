@@ -13,19 +13,25 @@
 # 2. Improve the book detection
 # 3. Tune the navigation + object avoidance
 
-import cv2
-import numpy as np
 import tensorflow as tf
 from cflib.crazyflie import Crazyflie
 import cflib.crtp
-import time
 from ultralytics import YOLO
+import time
+import numpy as np
+import cv2
+import matplotlib.pyplot as plt
+import cflib.crtp
+from cflib.crazyflie.log import LogConfig
+from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
+from cflib.crazyflie.syncLogger import SyncLogger
+from cflib.positioning.position_hl_commander import PositionHlCommander
 
 # Initialize the Crazyflie communication drivers
 cflib.crtp.init_drivers()
 
 # Define the radio URI for your Crazyflie
-radio_uri = "radio://0/3/2M"
+radio_uri = "radio://0/21/2M"
 
 # Load the Keras-trained model for obstacle detection
 # Updated to use the 300x300 model

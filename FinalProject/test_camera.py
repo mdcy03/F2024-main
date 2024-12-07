@@ -1,22 +1,22 @@
-import numpy as np
 import cv2
 
-# This may open your webcam instead of the CrazyFlie camera! If so, try
-# a different small, positive integer, e.g. 1, 2, 3.
-cap = cv2.VideoCapture(0)
 
-while(True):
-    # Capture frame-by-frame
-    ret, frame = cap.read()
+cap = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)  # Start with index 0
 
+if not cap.isOpened():
+    print("Camera index 0 not available, trying index 1.")
+    cap = cv2.VideoCapture(1, cv2.CAP_AVFOUNDATION)  # Try the next index
 
-    # Display the resulting frame
-    cv2.imshow('frame', frame)
+if not cap.isOpened():
+    print("No available camera found.")
+else:
+    print("Camera opened successfully!")
+    while True:
+        ret, frame = cap.read()
+        if ret:
+            cv2.imshow("Camera Feed", frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
-    # Hit q to quit.
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-# Release the capture
 cap.release()
 cv2.destroyAllWindows()
