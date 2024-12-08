@@ -8,11 +8,6 @@
 # This script controls the Crazyflie drone to navigate an obstacle course autonomously
 # using a Keras/TensorFlow Lite model for obstacle detection and a YOLOv8 model for book detection.
 
-# Need to do:
-# 1. Implement the area boundary code
-# 2. Improve the book detection
-# 3. Tune the navigation + object avoidance
-
 import tensorflow as tf
 from cflib.crazyflie import Crazyflie
 import cflib.crtp
@@ -20,169 +15,150 @@ from ultralytics import YOLO
 import time
 import numpy as np
 import cv2
-import matplotlib.pyplot as plt
-import cflib.crtp
-from cflib.crazyflie.log import LogConfig
 from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
-from cflib.crazyflie.syncLogger import SyncLogger
-from cflib.positioning.position_hl_commander import PositionHlCommander
 
-# Initialize the Crazyflie communication drivers
 cflib.crtp.init_drivers()
 
-# Define the radio URI for your Crazyflie
 radio_uri = "radio://0/21/2M"
 
+min_y_pos = -1.0
+max_y_pos = 1.0
+
 # Load the Keras-trained model for obstacle detection
-# Updated to use the 300x300 model
 obstacle_model = tf.keras.models.load_model("obstacle_model_300x300.keras")
 
-# Load the YOLOv8 model (from Coco Dataset) for book detection
+# Load the YOLOv8 model (from Coco Dataset) for bookdetection
 yolo_model = YOLO("yolov8n.pt")
 
-# Initialize Crazyflie
-cf = Crazyflie(rw_cache="./cache")
-
-# Preprocess image for Keras model
+# Preprocess image for the Keras model
 def preprocess_image(image, image_size=(300, 300)):
-    """
-    Preprocess the input image for the obstacle detection model.
-
-    Args:
-        image (numpy.ndarray): Input image.
-        image_size (tuple): Target size for resizing.
-
-    Returns:
-        numpy.ndarray: Preprocessed image ready for the model.
-    """
-    image = cv2.resize(image, image_size)  # Resize to match the model input size
+    image = cv2.resize(image, image_size)
     image = image / 255.0  # Normalize to [0, 1]
-    image = np.expand_dims(image, axis=0)  # Add batch dimension
+    image = np.expand_dims(image, axis=0)
     return image.astype(np.float32)
 
 # Detect book using YOLOv8
 def detect_book_with_yolo(image):
-    """
-    Detect books in the given image using YOLOv8.
-
-    Args:
-        image (numpy.ndarray): Input image.
-
-    Returns:
-        bool: True if a book is detected, False otherwise.
-    """
-    results = yolo_model(image)  # Run YOLOv8 detection
+    results = yolo_model(image)
     for result in results:
         for box, cls in zip(result.boxes.xyxy, result.boxes.cls):
             if int(cls) == 73:  # COCO class ID for 'book'
-                x1, y1, x2, y2 = map(int, box)  # Bounding box coordinates
-                # Draw bounding box and label
-                cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(
-                    image, "Book", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2
-                )
-                return True  # Book detected
+                width = abs(box[2] - box[0])
+                if width > 100:  # Threshold for book proximity
+                    return True  # Book detected
     return False  # No book detected
 
-# Command Crazyflie to hover, move, or land
-def send_command(cf, command):
-    """
-    Send movement commands to the Crazyflie.
+# Check contours for obstacle detection
+def check_contours(frame):
+    lb1, ub1 = (145, 35, 75), (180, 255, 255)
+    lb2, ub2 = (0, 75, 75), (20, 255, 255)
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    mask1 = cv2.inRange(hsv, lb1, ub1)
+    mask2 = cv2.inRange(hsv, lb2, ub2)
+    mask = cv2.bitwise_or(mask1, mask2)
+    contours, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    largest_area, largest_contour_index = find_greatest_contour(contours)
+    if largest_contour_index != -1 and largest_area > 100:
+        contour_x = np.mean(contours[largest_contour_index], axis=0).flatten()[0]
+        return mask, True, contour_x
+    return mask, False, -1
 
-    Args:
-        cf (Crazyflie): Crazyflie object.
-        command (str): Command to execute.
-    """
-    if command == "STOP":
-        cf.commander.send_hover_setpoint(0.0, 0.0, 0.0, 0.0)  # Stop movement
-    elif command == "RIGHT":
-        cf.commander.send_hover_setpoint(0.0, 0.3, 0.5, 0.5)  # Move right
-    elif command == "FORWARD":
-        cf.commander.send_hover_setpoint(0.5, 0.0, 0.5, 0.5)  # Move forward
-    elif command == "LAND":
-        cf.commander.send_stop_setpoint()  # Land
+# Helper function to find the largest contour
+def find_greatest_contour(contours):
+    largest_area = 0
+    largest_index = -1
+    for i, contour in enumerate(contours):
+        area = cv2.contourArea(contour)
+        if area > largest_area:
+            largest_area = area
+            largest_index = i
+    return largest_area, largest_index
 
-# Process frames and send commands
-def process_frames(cf, cap):
-    """
-    Process video frames for obstacle and book detection.
+# Adjust position gradually
+def adjust_position(cf, current_x, current_y, direction):
+    steps_per_meter = 10
+    for _ in range(1):  # Adjust step size if needed
+        if direction == "RIGHT":
+            current_y -= 1.0 / steps_per_meter
+        elif direction == "FORWARD":
+            current_x += 1.0 / steps_per_meter
+        elif direction == "LEFT":
+            current_y += 1.0 / steps_per_meter
+        cf.commander.send_position_setpoint(current_x, current_y, 1.0, 0.0)
+        time.sleep(0.1)
+    return current_x, current_y
 
-    Args:
-        cf (Crazyflie): Crazyflie object.
-        cap (cv2.VideoCapture): Video capture object.
-    """
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("Failed to grab frame.")
-            break
-
-        # Check for the book
-        if detect_book_with_yolo(frame):
-            print("Book detected! Landing.")
-            send_command(cf, "LAND")
-            break
-
-        # Preprocess the frame for obstacle prediction
-        input_data = preprocess_image(frame)
-        prediction = obstacle_model.predict(input_data)[0][0]
-
-        # Process prediction and send command
-        if prediction > 0.5:  # Obstacle detected
-            print("Obstacle detected! Moving right.")
-            send_command(cf, "RIGHT")
-        else:  # No obstacle
-            print("No obstacle. Moving forward.")
-            send_command(cf, "FORWARD")
-
-        # Display the frame with predictions
-        cv2.putText(frame, f"Obstacle: {'Yes' if prediction > 0.5 else 'No'}",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        cv2.putText(frame, f"Book: {'Yes' if detect_book_with_yolo(frame) else 'No'}",
-                    (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        cv2.imshow("Obstacle and Book Detection", frame)
-
-        # Break on ESC key
-        if cv2.waitKey(1) & 0xFF == 27:
-            break
-
-# Main control function
 def main():
     try:
-        # Connect to Crazyflie
-        cf.open_link(radio_uri)
-        print("Connected to Crazyflie!")
+        with SyncCrazyflie(radio_uri, cf=Crazyflie(rw_cache="./cache")) as scf:
+            cf = scf.cf
 
-        # Wait for the Crazyflie to initialize
-        time.sleep(2)
+            # Initialize and stabilize
+            cf.param.set_value('stabilizer.controller', '1')
+            cf.param.set_value('kalman.resetEstimation', '1')
+            time.sleep(0.1)
+            cf.param.set_value('kalman.resetEstimation', '0')
+            time.sleep(2)
 
-        # Take off
-        print("Taking off...")
-        cf.commander.send_hover_setpoint(0.0, 0.0, 0.5, 0.0)  # Ascend to 0.5 meters
-        time.sleep(2)
+            # Ascend to 1 meter and hover for stabilization
+            print("Ascending to 1 meter...")
+            for z in np.linspace(0, 1.0, num=20):
+                cf.commander.send_hover_setpoint(0, 0, 0, z)
+                time.sleep(0.1)
+            print("Hovering at 1 meter...")
+            for _ in range(30):  # Hover for 3 seconds
+                cf.commander.send_hover_setpoint(0, 0, 0, 1.0)
+                time.sleep(0.1)
 
-        # Open the camera
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            print("Error: Could not open camera.")
-            return
+            # Open camera
+            cap = cv2.VideoCapture(0)
+            if not cap.isOpened():
+                print("Error: Could not open camera.")
+                return
 
-        print("Starting obstacle and book detection...")
-        process_frames(cf, cap)
+            current_x, current_y = 0, 0
+            print("Starting navigation...")
 
-        # Land the Crazyflie
-        print("Landing...")
-        send_command(cf, "LAND")
-        time.sleep(2)
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                # Check for book
+                if detect_book_with_yolo(frame):
+                    print("Book detected! Landing.")
+                    for z in np.linspace(1.0, 0, num=20):
+                        cf.commander.send_hover_setpoint(0, 0, 0, z)
+                        time.sleep(0.1)
+                    cf.commander.send_stop_setpoint()
+                    break
+
+                # Check contours
+                mask, obstacle_detected, contour_x = check_contours(frame)
+                if current_y < min_y_pos:
+                    print("Boundary too far right. Moving LEFT.")
+                    current_x, current_y = adjust_position(cf, current_x, current_y, "LEFT")
+                elif current_y > max_y_pos:
+                    print("Boundary too far left. Moving RIGHT.")
+                    current_x, current_y = adjust_position(cf, current_x, current_y, "RIGHT")
+                elif obstacle_detected and abs(contour_x - frame.shape[1] // 2) < 100:
+                    print("Obstacle too close! Adjusting.")
+                    direction = "RIGHT" if contour_x < frame.shape[1] // 2 else "LEFT"
+                    current_x, current_y = adjust_position(cf, current_x, current_y, direction)
+                else:
+                    print("Path clear. Moving FORWARD.")
+                    current_x, current_y = adjust_position(cf, current_x, current_y, "FORWARD")
+
+                cv2.imshow("Obstacle Detection", frame)
+                if cv2.waitKey(1) & 0xFF == 27:
+                    break
 
     except KeyboardInterrupt:
-        print("Interrupted! Landing...")
-        send_command(cf, "LAND")
+        cf.commander.send_stop_setpoint()
     finally:
-        cf.close_link()
-        print("Connection closed.")
+        if 'cap' in locals():
+            cap.release()
         cv2.destroyAllWindows()
 
-# Run the script
 if __name__ == "__main__":
     main()
