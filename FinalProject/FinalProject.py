@@ -19,34 +19,45 @@ from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
 
 cflib.crtp.init_drivers()
 
-radio_uri = "radio://0/21/2M"
+radio_uri = "radio://0/03/2M"
 
-min_y_pos = -1.0
-max_y_pos = 1.0
+min_y_pos = -1
+max_y_pos = 1
 
-# Load the Keras-trained model for obstacle detection
-obstacle_model = tf.keras.models.load_model("obstacle_model_300x300.keras")
+# Detect "book" using blue contours
+def detect_book_with_blue_contour(frame):
+    """
+    Detect a book using blue contour detection logic.
 
-# Load the YOLOv8 model (from Coco Dataset) for bookdetection
-yolo_model = YOLO("yolov8n.pt")
+    Args:
+        frame (numpy.ndarray): Input image frame.
 
-# Preprocess image for the Keras model
-def preprocess_image(image, image_size=(300, 300)):
-    image = cv2.resize(image, image_size)
-    image = image / 255.0  # Normalize to [0, 1]
-    image = np.expand_dims(image, axis=0)
-    return image.astype(np.float32)
+    Returns:
+        bool: True if a book-like object is detected, False otherwise.
+    """
+    # Define the lower and upper HSV bounds for blue
+    lower_blue = np.array([100, 150, 50])
+    upper_blue = np.array([140, 255, 255])
 
-# Detect book using YOLOv8
-def detect_book_with_yolo(image):
-    results = yolo_model(image)
-    for result in results:
-        for box, cls in zip(result.boxes.xyxy, result.boxes.cls):
-            if int(cls) == 73:  # COCO class ID for 'book'
-                width = abs(box[2] - box[0])
-                if width > 100:  # Threshold for book proximity
-                    return True  # Book detected
-    return False  # No book detected
+    # Convert frame to HSV color space
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+    # Create a mask for blue objects
+    mask = cv2.inRange(hsv, lower_blue, upper_blue)
+
+    # Find contours in the mask
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if 5000 < area < 20000:  # Example thresholds for a "book"-like size
+            # Draw the contour and a bounding box
+            x, y, w, h = cv2.boundingRect(contour)
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 0, 0), 2)
+            cv2.putText(frame, "Book Detected", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+            return True
+    return False
+
 
 # Check contours for obstacle detection
 def check_contours(frame):
@@ -79,11 +90,11 @@ def adjust_position(cf, current_x, current_y, direction):
     steps_per_meter = 10
     for _ in range(1):  # Adjust step size if needed
         if direction == "RIGHT":
-            current_y -= 1.0 / steps_per_meter
+            current_y -= 0.5 / steps_per_meter
         elif direction == "FORWARD":
-            current_x += 1.0 / steps_per_meter
+            current_x += 0.5 / steps_per_meter
         elif direction == "LEFT":
-            current_y += 1.0 / steps_per_meter
+            current_y += 0.5 / steps_per_meter
         cf.commander.send_position_setpoint(current_x, current_y, 1.0, 0.0)
         time.sleep(0.1)
     return current_x, current_y
@@ -124,8 +135,8 @@ def main():
                 if not ret:
                     break
 
-                # Check for book
-                if detect_book_with_yolo(frame):
+                # Check for book using blue contour detection
+                if detect_book_with_blue_contour(frame):
                     print("Book detected! Landing.")
                     for z in np.linspace(1.0, 0, num=20):
                         cf.commander.send_hover_setpoint(0, 0, 0, z)
@@ -133,7 +144,7 @@ def main():
                     cf.commander.send_stop_setpoint()
                     break
 
-                # Check contours
+                # Check contours for obstacle detection
                 mask, obstacle_detected, contour_x = check_contours(frame)
                 if current_y < min_y_pos:
                     print("Boundary too far right. Moving LEFT.")
@@ -143,22 +154,26 @@ def main():
                     current_x, current_y = adjust_position(cf, current_x, current_y, "RIGHT")
                 elif obstacle_detected and abs(contour_x - frame.shape[1] // 2) < 100:
                     print("Obstacle too close! Adjusting.")
-                    direction = "RIGHT" if contour_x < frame.shape[1] // 2 else "LEFT"
+                    direction = "RIGHT" if contour_x <= frame.shape[1] // 2 else "LEFT"
                     current_x, current_y = adjust_position(cf, current_x, current_y, direction)
                 else:
                     print("Path clear. Moving FORWARD.")
                     current_x, current_y = adjust_position(cf, current_x, current_y, "FORWARD")
 
+                # Display the frame with detection overlays
                 cv2.imshow("Obstacle Detection", frame)
                 if cv2.waitKey(1) & 0xFF == 27:
                     break
 
     except KeyboardInterrupt:
+        print("Emergency stop! Landing...")
         cf.commander.send_stop_setpoint()
     finally:
+        # Cleanup resources
         if 'cap' in locals():
             cap.release()
         cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     main()

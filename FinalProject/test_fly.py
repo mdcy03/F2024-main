@@ -5,7 +5,7 @@ import time
 # Initialize the low-level drivers
 cflib.crtp.init_drivers()
 
-uri = "radio://0/21/2M" 
+uri = "radio://0/03/2M"
 
 def simple_takeoff(cf):
     print("Taking off...")
